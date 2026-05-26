@@ -11,9 +11,11 @@ file and want to annotate it — without running the full pipeline.
 
 | Track | Tool | Input |
 |-------|------|-------|
-| Long-read coverage | minimap2 → samtools → bedtools genomecov | reads + assembly |
+| Long-read coverage | minimap2 → samtools → bedtools genomecov | reads (or pre-mapped BAM) + assembly |
 | Assembly gaps | gfastats → awk | assembly |
-| Telomeres | [telo_scan.py](scripts/telo_scan.py) | assembly |
+| Telomeres 5p (forward) | [telo_scan.py](scripts/telo_scan.py) | assembly |
+| Telomeres 3p (reverse) | [telo_scan.py](scripts/telo_scan.py) | assembly |
+| Telomeres combined | [telo_scan.py](scripts/telo_scan.py) | assembly |
 
 All tracks are injected into a copy of your `.pretext` (and optionally `.HR.pretext`)
 file using `PretextGraph`.
@@ -28,15 +30,24 @@ conda activate pretext-extensions
 ## Usage
 
 ```bash
+# From raw reads (minimap2 maps them):
 python run_pretext_extensions.py \
-    --assembly  genome.fa \
-    --pretext   assembly.pretext \
+    --assembly   genome.fa \
+    --pretext    assembly.pretext \
     --hr-pretext assembly.HR.pretext \   # optional
-    --reads     reads.ont.fastq.gz \
-    --read-type ont \                    # ont | hifi
+    --reads      reads.ont.fastq.gz \
+    --read-type  ont \                   # ont | hifi
     --telomere-motif TTAGGG \
-    --threads   16 \
-    --outdir    pretext_out/
+    --threads    16 \
+    --outdir     pretext_out/
+
+# From a pre-mapped sorted BAM (skips minimap2):
+python run_pretext_extensions.py \
+    --assembly   genome.fa \
+    --pretext    assembly.pretext \
+    --bam        lr_sorted.bam \
+    --telomere-motif TTAGGG \
+    --outdir     pretext_out/
 ```
 
 Output files land in `--outdir`:
@@ -45,11 +56,13 @@ Output files land in `--outdir`:
 pretext_out/
 ├── assembly.extensions.pretext        # annotated copy
 ├── assembly.HR.extensions.pretext     # (if --hr-pretext given)
-├── lr_sorted.bam                      # long-read mapping
+├── lr_sorted.bam                      # long-read mapping (if --reads used)
 ├── lr_coverage.bg
 ├── gaps.bed
 ├── gaps.bg
-└── telo.TTAGGG.5p+3p_telomere.bg
+├── telo.TTAGGG.5p_telomere.bg         # forward strand
+├── telo.TTAGGG.3p_telomere.bg         # reverse strand
+└── telo.TTAGGG.5p+3p_telomere.bg      # combined
 ```
 
 ### Skip individual tracks
@@ -74,8 +87,9 @@ python run_pretext_extensions.py \
 --assembly          Assembly FASTA (required)
 --pretext           Input .pretext file (required)
 --hr-pretext        Input .HR.pretext file (optional)
---reads             Long reads FASTQ (required unless --skip-coverage)
---read-type         ont | hifi (required with --reads)
+--reads             Long reads FASTQ — minimap2 maps them (mutually exclusive with --bam)
+--bam               Pre-mapped sorted BAM — skips minimap2 (mutually exclusive with --reads)
+--read-type         ont | hifi (required with --reads, ignored with --bam)
 --telomere-motif    Telomeric repeat motif, 5′→3′ forward strand, e.g. TTAGGG (required)
 --telo-window       Window size in bp for telo_scan.py (default: 10000)
 --telo-min-tandem   Min consecutive copies for telo_scan.py (default: 2)
@@ -83,7 +97,7 @@ python run_pretext_extensions.py \
 --outdir            Output directory (default: pretext_extensions_out/)
 --skip-coverage     Skip the long-read coverage track
 --skip-gaps         Skip the assembly gaps track
---skip-telomeres    Skip the telomere track
+--skip-telomeres    Skip the telomere track (see warnings above)
 -v / --verbose      Show debug output
 ```
 

@@ -8,14 +8,17 @@ PretextMap file.
 Steps
 -----
 1. Map long reads to the assembly with minimap2, sort and index the BAM.
+   (Skip this step by supplying a pre-mapped BAM with --bam.)
 2. Compute a genome-coverage bedgraph with bedtools genomecov.
 3. Extract assembly gaps with gfastats and convert to bedgraph.
 4. Scan for telomeric repeats with telo_scan.py (bundled in scripts/).
+   Produces three tracks: 5p (forward), 3p (reverse), and combined.
 5. Inject all non-empty bedgraphs into the .pretext (and optionally .HR.pretext)
    file using PretextGraph.
 
 Usage example
 -------------
+    # With raw reads (minimap2 mapping done here):
     python run_pretext_extensions.py \\
         --assembly genome.fa \\
         --pretext  assembly.pretext \\
@@ -24,6 +27,14 @@ Usage example
         --read-type ont \\
         --telomere-motif TTAGGG \\
         --threads  16 \\
+        --outdir   pretext_out/
+
+    # With a pre-mapped sorted BAM:
+    python run_pretext_extensions.py \\
+        --assembly genome.fa \\
+        --pretext  assembly.pretext \\
+        --bam      lr_sorted.bam \\
+        --telomere-motif TTAGGG \\
         --outdir   pretext_out/
 """
 
@@ -111,17 +122,22 @@ def make_gaps_bg(assembly: Path, outdir: Path) -> Path:
     return gaps_bg
 
 
-def make_telomere_bg(assembly: Path, motif: str, outdir: Path,
-                     threads: int, window: int, min_tandem: int) -> Path:
-    prefix   = outdir / "telo"
-    combined = outdir / f"telo.{motif.upper()}.5p+3p_telomere.bg"
+def make_telomere_bgs(assembly: Path, motif: str, outdir: Path,
+                      threads: int, window: int, min_tandem: int) -> dict:
+    """Run telo_scan.py and return a dict of {track_name: Path} for all three strands."""
+    prefix = outdir / "telo"
+    tag    = motif.upper()
     run(
         f"python {TELO_SCAN} -i {assembly} -m {motif} "
         f"-o {prefix} --threads {threads} "
         f"--window {window} --min-tandem {min_tandem} --no-hits",
         desc=f"Scanning for telomeric repeats ({motif}) …",
     )
-    return combined
+    return {
+        "telomere 5p": outdir / f"telo.{tag}.5p_telomere.bg",
+        "telomere 3p": outdir / f"telo.{tag}.3p_telomere.bg",
+        "telomere":    outdir / f"telo.{tag}.5p+3p_telomere.bg",
+    }
 
 
 def inject_tracks(pretext_in: Path, pretext_out: Path,
@@ -150,11 +166,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--assembly",  required=True, type=Path, help="Assembly FASTA (.fa / .fa.gz)")
     p.add_argument("--pretext",   required=True, type=Path, help="Input .pretext file")
 
-    # Reads (optional together)
-    p.add_argument("--reads",     type=Path, default=None,
-                   help="Long reads FASTQ (.fastq.gz). Omit to skip the coverage track.")
+    # Reads / BAM (mutually exclusive)
+    cov = p.add_mutually_exclusive_group()
+    cov.add_argument("--reads", type=Path, default=None,
+                     help="Long reads FASTQ (.fastq.gz). minimap2 will map them to the assembly.")
+    cov.add_argument("--bam",   type=Path, default=None,
+                     help="Pre-mapped, sorted long-read BAM. Skips minimap2 entirely.")
     p.add_argument("--read-type", choices=["ont", "hifi"], default=None,
-                   help="Read technology — required when --reads is given.")
+                   help="Read technology — required when --reads is given (ignored with --bam).")
 
     # Optional pretext
     p.add_argument("--hr-pretext", type=Path, default=None,
@@ -196,10 +215,9 @@ def main() -> None:
         log.error("--read-type (ont|hifi) is required when --reads is given.")
         sys.exit(1)
     if args.read_type and not args.reads:
-        log.error("--reads is required when --read-type is given.")
-        sys.exit(1)
+        log.warning("--read-type is ignored because --reads was not given.")
 
-    want_coverage = bool(args.reads) and not args.skip_coverage
+    want_coverage = bool(args.reads or args.bam) and not args.skip_coverage
 
     # Validate telomere options
     if args.telomere_motif and args.skip_telomeres:
@@ -235,10 +253,11 @@ def main() -> None:
         log.warning("=" * 60)
 
     # Check required tools
+    need_minimap2 = want_coverage and not args.bam
     for tool in ["minimap2", "samtools", "bedtools", "gfastats", "PretextGraph"]:
-        if tool == "minimap2" and not want_coverage:
+        if tool == "minimap2" and not need_minimap2:
             continue
-        if tool in ("minimap2", "samtools", "bedtools") and not want_coverage:
+        if tool in ("samtools", "bedtools") and not want_coverage:
             continue
         if tool == "gfastats" and args.skip_gaps:
             continue
@@ -249,8 +268,12 @@ def main() -> None:
     # ---- Step 1 & 2: long-read coverage ----
     coverage_bg = None
     if want_coverage:
-        bam = map_long_reads(args.assembly, args.reads, args.read_type,
-                             args.outdir, args.threads)
+        if args.bam:
+            log.info("Using pre-mapped BAM: %s", args.bam)
+            bam = args.bam
+        else:
+            bam = map_long_reads(args.assembly, args.reads, args.read_type,
+                                 args.outdir, args.threads)
         coverage_bg = make_coverage_bg(bam, args.outdir)
 
     # ---- Step 3: gaps ----
@@ -259,9 +282,9 @@ def main() -> None:
         gaps_bg = make_gaps_bg(args.assembly, args.outdir)
 
     # ---- Step 4: telomeres ----
-    telo_bg = None
+    telo_bgs: dict[str, Path] = {}
     if not args.skip_telomeres:
-        telo_bg = make_telomere_bg(
+        telo_bgs = make_telomere_bgs(
             args.assembly, args.telomere_motif, args.outdir,
             args.threads, args.telo_window, args.telo_min_tandem,
         )
@@ -270,8 +293,7 @@ def main() -> None:
     tracks: dict[str, Path] = {}
     if gaps_bg:
         tracks["gap"] = gaps_bg
-    if telo_bg:
-        tracks["telomere"] = telo_bg
+    tracks.update(telo_bgs)   # telomere 5p, telomere 3p, telomere (combined)
     if coverage_bg:
         tracks["coverage"] = coverage_bg
 
