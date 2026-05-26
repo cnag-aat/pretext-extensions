@@ -134,8 +134,8 @@ def make_telomere_bgs(assembly: Path, motif: str, outdir: Path,
         desc=f"Scanning for telomeric repeats ({motif}) …",
     )
     return {
-        "telomere 5p": outdir / f"telo.{tag}.5p_telomere.bg",
-        "telomere 3p": outdir / f"telo.{tag}.3p_telomere.bg",
+        "5p_telomere": outdir / f"telo.{tag}.5p_telomere.bg",
+        "3p_telomere": outdir / f"telo.{tag}.3p_telomere.bg",
         "telomere":    outdir / f"telo.{tag}.5p+3p_telomere.bg",
     }
 
