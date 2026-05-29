@@ -271,22 +271,66 @@ def main():
         for scaffold, seq in open_fasta(args.input):
             yield scaffold, seq, canonical, args.min_tandem, args.max_gap, args.window, args.no_hits
 
+    scaffold_lengths = {}  # used later by the strand-label heuristic
+
     with multiprocessing.Pool(processes=args.threads) as pool:
         for scaffold, seq_len, result in pool.imap(_scan_scaffold, task_iter()):
             print(f"  scaffold {scaffold}  len={seq_len:,}", file=sys.stderr)
+            scaffold_lengths[scaffold] = seq_len
             for fwd_motif, data in result.items():
                 fwd_data[fwd_motif].append(data["fwd"])
                 rev_data[fwd_motif].append(data["rev"])
                 comb_data[fwd_motif].append(data["comb"])
                 hit_data[fwd_motif].extend(data["hits"])
 
+    # ---------------------------------------------------------------------------
+    # Heuristic: decide which strand is 5p and which is 3p per motif.
+    #
+    # For each scaffold with ≥ 10 windows, sum fwd counts in the first 5 windows
+    # and the last 5 windows.  If the fwd motif is predominantly at starts across
+    # all qualifying scaffolds it is labelled 5p_telomere; if predominantly at
+    # ends it is 3p_telomere.  Default (tie / no data) is fwd = 3p_telomere,
+    # because the canonical telomeric motif (e.g. TTAGGG) is the sequence
+    # synthesised by telomerase and is added to the 3' end of chromosomes.
+    # ---------------------------------------------------------------------------
+    TERM_WINS = 5   # number of terminal windows to inspect at each end
+    MIN_WINS  = 10  # minimum windows a scaffold must have to be included
+
+    motif_labels = {}  # fwd_motif -> (fwd_label, rev_label)
+    for fwd_motif in canonical:
+        start_score = end_score = 0
+        for scaffold, wins, counts in fwd_data[fwd_motif]:
+            n = len(wins)
+            if n < MIN_WINS:
+                continue
+            start_score += sum(counts[:TERM_WINS])
+            end_score   += sum(counts[-TERM_WINS:])
+
+        if start_score > end_score:
+            fwd_label, rev_label = "5p", "3p"
+            reason = f"fwd skews to starts (start={start_score} end={end_score})"
+        else:
+            fwd_label, rev_label = "3p", "5p"
+            if end_score > start_score:
+                reason = f"fwd skews to ends (start={start_score} end={end_score})"
+            else:
+                reason = f"no signal or tie (start={start_score} end={end_score}) — using default"
+
+        motif_labels[fwd_motif] = (fwd_label, rev_label)
+        print(
+            f"[info] {fwd_motif}: fwd→{fwd_label}_telomere  "
+            f"rev→{rev_label}_telomere  ({reason})",
+            file=sys.stderr,
+        )
+
     # Write outputs
     prefix = args.output
     for fwd_motif in canonical:
         tag = fwd_motif
+        fwd_label, rev_label = motif_labels[fwd_motif]
 
-        fwd_path = f"{prefix}.{tag}.5p_telomere.bg"
-        rev_path = f"{prefix}.{tag}.3p_telomere.bg"
+        fwd_path  = f"{prefix}.{tag}.{fwd_label}_telomere.bg"
+        rev_path  = f"{prefix}.{tag}.{rev_label}_telomere.bg"
         comb_path = f"{prefix}.{tag}.5p+3p_telomere.bg"
         hits_path = f"{prefix}.{tag}.hits.tsv"
 
